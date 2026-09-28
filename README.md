@@ -51,6 +51,21 @@ MIN_DELAY_BETWEEN_EMAILS_MS
 MAX_EMAILS_PER_HOUR_PER_SENDER
 ```
 
+### Ethereal Email
+
+No Ethereal account or SMTP password is required in `.env`. When a user schedules their first batch and has no saved senders, the backend calls `nodemailer.createTestAccount()` three times. It stores each generated Ethereal SMTP account in the `Sender` table and uses those senders round-robin for the batch.
+
+The generated values are used internally as follows:
+
+```text
+smtpHost <- account.smtp.host
+smtpPort <- account.smtp.port
+smtpUser <- account.user
+smtpPass <- account.pass
+```
+
+To inspect a sent test message, log the worker output or use the Ethereal preview URL returned by Nodemailer after adding preview logging. Ethereal is intended for development and demos; replace the sender provisioning with a real SMTP provider before production use. The only SMTP-related environment values required by this project are the database, Redis, and worker settings listed above because Ethereal credentials are generated and persisted automatically.
+
 Install and migrate the backend:
 
 ```bash
@@ -191,3 +206,32 @@ The load test intentionally schedules 1,000 recipients with `hourlyLimit: 1` to 
 cd backend
 LOAD_TEST_SESSION_COOKIE='session=your-cookie-value' npm run load-test
 ```
+
+## Implemented features
+
+### Backend
+
+- **Scheduler:** `POST /api/emails/schedule` validates input, deduplicates recipients, creates one row per recipient, assigns senders round-robin, and adds BullMQ delayed jobs.
+- **Persistence:** PostgreSQL stores users, senders, email content, schedule timestamps, delivery status, errors, and batch IDs through Prisma.
+- **Durable jobs:** BullMQ stores delayed jobs in Redis, with `jobId=email.id`, three attempts, and exponential backoff.
+- **Idempotency:** The worker atomically changes each row from `scheduled` to `processing` before SMTP delivery, preventing duplicate sends across workers.
+- **Rate limiting:** BullMQ enforces the configured minimum delay between sends. Redis Lua counters enforce per-sender hourly limits with `rl:{senderId}:{YYYYMMDDHH}`.
+- **Concurrency:** Worker concurrency is controlled by `WORKER_CONCURRENCY`; multiple workers coordinate through Redis and atomic PostgreSQL updates.
+- **Limit rollover:** Emails over the hourly limit move to the next UTC hour with their order preserved instead of being dropped or failed.
+- **Recovery:** Startup recovery resets stale `processing` rows, while BullMQ stalled-job handling recovers jobs after worker crashes.
+- **Authentication:** Google OAuth creates/upserts users and signs an httpOnly session cookie. Protected routes use the real session middleware.
+- **Slack:** Slack OAuth stores incoming webhook URLs per user; worker notifications read the current webhook from PostgreSQL and fail quietly.
+- **Search:** Elasticsearch indexing/search is supported, with a PostgreSQL fallback when `ELASTICSEARCH_ENABLED=false`.
+- **Operations:** `/health` reports PostgreSQL and Redis connectivity. Bull Board is available at `/admin/queues` for authenticated users.
+
+### Frontend
+
+- **Login:** `/login` provides the Google OAuth sign-in action and uses credentialed cookies.
+- **Dashboard:** `/dashboard` is protected and displays the current user's name, email, avatar, Slack connection state, and logout action.
+- **Compose:** The compose modal accepts subject, body, CSV/TXT uploads, pasted recipients, future start time, delay in seconds, and hourly limit.
+- **Recipient parsing:** Uploaded and pasted content is parsed in the browser with an email regex, normalized, deduplicated, and counted before submission.
+- **Email tables:** Scheduled Emails and Sent Emails tabs share one typed table component with email, subject, time, and status columns.
+- **Search:** The search box calls `/api/emails/search` after a debounce and keeps results scoped to the signed-in user.
+- **Live updates:** Scheduled emails refresh every 10 seconds and refetch when the browser regains focus.
+- **States:** Loading spinner, empty state, API error with retry, inline form validation, and scheduling toast are implemented.
+- **Responsive UI:** The dashboard uses React, Vite, TypeScript, Tailwind, and reusable typed UI components with Lucide icons.
